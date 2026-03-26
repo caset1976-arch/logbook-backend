@@ -38,8 +38,8 @@ const TOKEN = "token123";
   METTI QUI LE TUE CREDENZIALI QRZ XML
   Queste NON sono la API key logbook.
 */
-const QRZ_USER = "IL_TUO_USERNAME_QRZ";
-const QRZ_PASS = "LA_TUA_PASSWORD_QRZ";
+const QRZ_USER = "in3jie";
+const QRZ_PASS = "Tremalzo1976";
 
 let qrzSessionKey = "";
 let qrzSessionTime = 0;
