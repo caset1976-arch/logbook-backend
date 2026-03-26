@@ -77,8 +77,8 @@ app.post("/api/qsos", auth, (req, res) => {
     INSERT INTO qsos (
       call, station_callsign, qso_date, time_on,
       band, freq, mode, rst_sent, rst_rcvd,
-      name, qth, country, grid, comment, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      name, qth, country, grid, comment, qrz_status, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const info = stmt.run(
@@ -96,10 +96,24 @@ app.post("/api/qsos", auth, (req, res) => {
     q.country || "",
     q.grid || "",
     q.comment || "",
+    q.qrz_status || "local",
     new Date().toISOString()
   );
 
   res.json({ id: info.lastInsertRowid });
+});
+
+app.delete("/api/qsos/:id", auth, (req, res) => {
+  const id = req.params.id;
+
+  const stmt = db.prepare("DELETE FROM qsos WHERE id = ?");
+  const info = stmt.run(id);
+
+  if (info.changes === 0) {
+    return res.status(404).json({ error: "QSO non trovato" });
+  }
+
+  res.json({ ok: true, deleted: id });
 });
 
 app.listen(3000, () => {
