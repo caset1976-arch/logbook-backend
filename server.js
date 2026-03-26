@@ -34,11 +34,91 @@ const USER = "admin";
 const PASS = "1234";
 const TOKEN = "token123";
 
+/*
+  METTI QUI LE TUE CREDENZIALI QRZ XML
+  Queste NON sono la API key logbook.
+*/
+const QRZ_USER = "IL_TUO_USERNAME_QRZ";
+const QRZ_PASS = "LA_TUA_PASSWORD_QRZ";
+
+let qrzSessionKey = "";
+let qrzSessionTime = 0;
+
 function auth(req, res, next) {
   const h = req.headers.authorization || "";
   const t = h.replace("Bearer ", "");
   if (t !== TOKEN) return res.status(401).json({ error: "unauthorized" });
   next();
+}
+
+function xmlValue(xml, tag) {
+  const m = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "i"));
+  return m ? m[1].trim() : "";
+}
+
+async function qrzLogin() {
+  const url =
+    `https://xmldata.qrz.com/xml/current/?username=${encodeURIComponent(QRZ_USER)}` +
+    `&password=${encodeURIComponent(QRZ_PASS)}`;
+
+  const r = await fetch(url);
+  const text = await r.text();
+
+  const key = xmlValue(text, "Key");
+  const error = xmlValue(text, "Error");
+
+  if (!key) {
+    throw new Error(error || "QRZ login failed");
+  }
+
+  qrzSessionKey = key;
+  qrzSessionTime = Date.now();
+  return key;
+}
+
+async function ensureQrzSession() {
+  // sessione riusata per 30 minuti circa
+  if (qrzSessionKey && Date.now() - qrzSessionTime < 30 * 60 * 1000) {
+    return qrzSessionKey;
+  }
+  return await qrzLogin();
+}
+
+async function qrzLookupCallsign(callsign) {
+  let session = await ensureQrzSession();
+
+  let url =
+    `https://xmldata.qrz.com/xml/current/?s=${encodeURIComponent(session)}` +
+    `&callsign=${encodeURIComponent(callsign)}`;
+
+  let r = await fetch(url);
+  let text = await r.text();
+
+  let error = xmlValue(text, "Error");
+
+  // se la sessione è scaduta, rifai login una volta
+  if (error && /session/i.test(error)) {
+    session = await qrzLogin();
+    url =
+      `https://xmldata.qrz.com/xml/current/?s=${encodeURIComponent(session)}` +
+      `&callsign=${encodeURIComponent(callsign)}`;
+    r = await fetch(url);
+    text = await r.text();
+    error = xmlValue(text, "Error");
+  }
+
+  if (error) {
+    throw new Error(error);
+  }
+
+  return {
+    callsign: xmlValue(text, "call") || callsign.toUpperCase(),
+    name: xmlValue(text, "fname"),
+    surname: xmlValue(text, "name"),
+    qth: xmlValue(text, "addr2"),
+    country: xmlValue(text, "country"),
+    grid: xmlValue(text, "grid")
+  };
 }
 
 app.get("/", (req, res) => {
@@ -53,16 +133,20 @@ app.post("/api/auth/login", (req, res) => {
   res.json({ token: TOKEN });
 });
 
-app.post("/api/lookup", auth, (req, res) => {
-  const { callsign } = req.body || {};
-  res.json({
-    callsign: (callsign || "").toUpperCase(),
-    name: "Demo",
-    surname: "User",
-    qth: "Trento",
-    country: "Italy",
-    grid: "JN56"
-  });
+app.post("/api/lookup", auth, async (req, res) => {
+  try {
+    const { callsign } = req.body || {};
+
+    if (!callsign) {
+      return res.status(400).json({ error: "callsign mancante" });
+    }
+
+    const data = await qrzLookupCallsign(callsign);
+
+    res.json(data);
+  } catch (e) {
+    res.status(500).json({ error: e.message || "lookup failed" });
+  }
 });
 
 app.get("/api/qsos", auth, (req, res) => {
