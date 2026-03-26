@@ -36,10 +36,17 @@ const TOKEN = "token123";
 
 /*
   METTI QUI LE TUE CREDENZIALI QRZ XML
-  Queste NON sono la API key logbook.
+  NON è la logbook API key.
 */
 const QRZ_USER = "in3jie";
 const QRZ_PASS = "Tremalzo1976";
+
+/*
+  METTI QUI LA TUA POSIZIONE STAZIONE
+  Se vuoi, dopo possiamo usare il tuo grid locator invece di lat/lon.
+*/
+const MY_LAT = 45.83;
+const MY_LON = 10.69;
 
 let qrzSessionKey = "";
 let qrzSessionTime = 0;
@@ -54,6 +61,41 @@ function auth(req, res, next) {
 function xmlValue(xml, tag) {
   const m = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "i"));
   return m ? m[1].trim() : "";
+}
+
+function toRad(d) {
+  return d * Math.PI / 180;
+}
+
+function toDeg(r) {
+  return r * 180 / Math.PI;
+}
+
+function calcBearing(lat1, lon1, lat2, lon2) {
+  const φ1 = toRad(lat1);
+  const φ2 = toRad(lat2);
+  const Δλ = toRad(lon2 - lon1);
+
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x =
+    Math.cos(φ1) * Math.sin(φ2) -
+    Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+
+  let θ = toDeg(Math.atan2(y, x));
+  return (θ + 360) % 360;
+}
+
+function calcDistanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) *
+    Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
 async function qrzLogin() {
@@ -77,7 +119,6 @@ async function qrzLogin() {
 }
 
 async function ensureQrzSession() {
-  // sessione riusata per 30 minuti circa
   if (qrzSessionKey && Date.now() - qrzSessionTime < 30 * 60 * 1000) {
     return qrzSessionKey;
   }
@@ -96,7 +137,6 @@ async function qrzLookupCallsign(callsign) {
 
   let error = xmlValue(text, "Error");
 
-  // se la sessione è scaduta, rifai login una volta
   if (error && /session/i.test(error)) {
     session = await qrzLogin();
     url =
@@ -111,13 +151,31 @@ async function qrzLookupCallsign(callsign) {
     throw new Error(error);
   }
 
+  const lat = parseFloat(xmlValue(text, "lat"));
+  const lon = parseFloat(xmlValue(text, "lon"));
+
+  let bearing = null;
+  let distance_km = null;
+  let long_path = null;
+
+  if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+    bearing = Math.round(calcBearing(MY_LAT, MY_LON, lat, lon));
+    long_path = (bearing + 180) % 360;
+    distance_km = Math.round(calcDistanceKm(MY_LAT, MY_LON, lat, lon));
+  }
+
   return {
     callsign: xmlValue(text, "call") || callsign.toUpperCase(),
     name: xmlValue(text, "fname"),
     surname: xmlValue(text, "name"),
     qth: xmlValue(text, "addr2"),
     country: xmlValue(text, "country"),
-    grid: xmlValue(text, "grid")
+    grid: xmlValue(text, "grid"),
+    lat: Number.isNaN(lat) ? null : lat,
+    lon: Number.isNaN(lon) ? null : lon,
+    bearing,
+    long_path,
+    distance_km
   };
 }
 
@@ -142,7 +200,6 @@ app.post("/api/lookup", auth, async (req, res) => {
     }
 
     const data = await qrzLookupCallsign(callsign);
-
     res.json(data);
   } catch (e) {
     res.status(500).json({ error: e.message || "lookup failed" });
