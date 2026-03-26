@@ -42,13 +42,13 @@ const TOKEN = "token123";
 /*
   QRZ XML (lookup)
 */
-const QRZ_USER = "in3jie";
-const QRZ_PASS = "Tremalzo1976";
+const QRZ_USER = "IL_TUO_USERNAME_QRZ";
+const QRZ_PASS = "LA_TUA_PASSWORD_QRZ";
 
 /*
   QRZ Logbook API KEY
 */
-const QRZ_LOGBOOK_KEY = "11B1-E407-55B1-866C";
+const QRZ_LOGBOOK_KEY = "LA_TUA_API_KEY_QRZ";
 
 /*
   Tua posizione stazione per bearing
