@@ -6,7 +6,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const DB = new sqlite3.Database("./logbook.db");
+const DB = new sqlite3.Database("./logbook_v2.db");
 
 DB.serialize(() => {
   DB.run(`
