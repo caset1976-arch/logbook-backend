@@ -35,18 +35,21 @@ const PASS = "1234";
 const TOKEN = "token123";
 
 /*
-  METTI QUI LE TUE CREDENZIALI QRZ XML
-  NON è la logbook API key.
+  QRZ XML (lookup)
 */
 const QRZ_USER = "in3jie";
 const QRZ_PASS = "Tremalzo1976";
 
 /*
-  METTI QUI LA TUA POSIZIONE STAZIONE
-  Se vuoi, dopo possiamo usare il tuo grid locator invece di lat/lon.
+  QRZ Logbook API KEY
 */
-const MY_LAT = 45.83;
-const MY_LON = 10.69;
+const QRZ_LOGBOOK_KEY = "11B1-E407-55B1-866C";
+
+/*
+  Tua posizione per bearing
+*/
+const MY_LAT = 46.06;
+const MY_LON = 11.12;
 
 let qrzSessionKey = "";
 let qrzSessionTime = 0;
@@ -179,6 +182,56 @@ async function qrzLookupCallsign(callsign) {
   };
 }
 
+function adifField(name, value) {
+  if (value === undefined || value === null || String(value) === "") return "";
+  const s = String(value);
+  return `<${name}:${s.length}>${s}`;
+}
+
+function qsoToAdif(q) {
+  return [
+    adifField("CALL", q.call),
+    adifField("QSO_DATE", q.qso_date),
+    adifField("TIME_ON", q.time_on),
+    adifField("BAND", q.band),
+    adifField("FREQ", q.freq),
+    adifField("MODE", q.mode),
+    adifField("RST_SENT", q.rst_sent),
+    adifField("RST_RCVD", q.rst_rcvd),
+    adifField("NAME", q.name),
+    adifField("QTH", q.qth),
+    adifField("COUNTRY", q.country),
+    adifField("GRIDSQUARE", q.grid),
+    adifField("COMMENT", q.comment),
+    adifField("STATION_CALLSIGN", q.station_callsign),
+    "<EOR>"
+  ].join("");
+}
+
+async function uploadQsoToQrz(qso) {
+  const adif = qsoToAdif(qso);
+
+  const body = new URLSearchParams();
+  body.set("KEY", QRZ_LOGBOOK_KEY);
+  body.set("ACTION", "INSERT");
+  body.set("ADIF", adif);
+
+  const r = await fetch("https://logbook.qrz.com/api", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: body.toString()
+  });
+
+  const text = await r.text();
+
+  // QRZ di solito risponde con RESULT=OK quando va bene
+  const ok = /RESULT\s*=\s*OK/i.test(text) || /<RESULT>OK<\/RESULT>/i.test(text);
+
+  return { ok, raw: text };
+}
+
 app.get("/", (req, res) => {
   res.json({ ok: true });
 });
@@ -255,6 +308,51 @@ app.delete("/api/qsos/:id", auth, (req, res) => {
   }
 
   res.json({ ok: true, deleted: id });
+});
+
+app.post("/api/qrz/sync", auth, async (req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT * FROM qsos
+      WHERE qrz_status = 'local' OR qrz_status = 'error'
+      ORDER BY id ASC
+    `).all();
+
+    const setSynced = db.prepare("UPDATE qsos SET qrz_status = 'synced' WHERE id = ?");
+    const setError = db.prepare("UPDATE qsos SET qrz_status = 'error' WHERE id = ?");
+
+    let synced = 0;
+    let errors = 0;
+    const details = [];
+
+    for (const qso of rows) {
+      try {
+        const result = await uploadQsoToQrz(qso);
+        if (result.ok) {
+          setSynced.run(qso.id);
+          synced++;
+          details.push({ id: qso.id, call: qso.call, status: "synced" });
+        } else {
+          setError.run(qso.id);
+          errors++;
+          details.push({ id: qso.id, call: qso.call, status: "error", raw: result.raw });
+        }
+      } catch (e) {
+        setError.run(qso.id);
+        errors++;
+        details.push({ id: qso.id, call: qso.call, status: "error", raw: e.message });
+      }
+    }
+
+    res.json({
+      total: rows.length,
+      synced,
+      errors,
+      details
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message || "sync failed" });
+  }
 });
 
 app.listen(3000, () => {
