@@ -1,4 +1,3 @@
-// server.js
 const express = require("express");
 const sqlite3 = require("sqlite3").verbose();
 const cors = require("cors");
@@ -8,21 +7,15 @@ const bcrypt = require("bcryptjs");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// =========================
-// CONFIG
-// =========================
 const JWT_SECRET = process.env.JWT_SECRET || "supersecretkey";
 const ADMIN_USER = process.env.ADMIN_USER || "admin";
 const ADMIN_PASS = process.env.ADMIN_PASS || "1234";
 
-// QRZ XML LOOKUP
-const QRZ_USER = process.env.QRZ_USER || "in3jie";
+const QRZ_USER = process.env.QRZ_USER || "IN3JIE";
 const QRZ_PASSWORD = process.env.QRZ_PASSWORD || "Tremalzo1976";
-
-// QRZ LOGBOOK API
 const QRZ_LOGBOOK_API_KEY = process.env.QRZ_LOGBOOK_API_KEY || "11B1-E407-55B1-866C";
+const MY_GRID = process.env.MY_GRID || "JN55";
 
-// fetch compatibile
 const fetchFn = (...args) => {
   if (typeof fetch === "function") return fetch(...args);
   return import("node-fetch").then(({ default: fetch }) => fetch(...args));
@@ -31,9 +24,6 @@ const fetchFn = (...args) => {
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
-// =========================
-// DATABASE
-// =========================
 const db = new sqlite3.Database("./logbook.db");
 
 db.serialize(() => {
@@ -64,15 +54,11 @@ db.serialize(() => {
   db.run(`CREATE INDEX IF NOT EXISTS idx_qsos_status ON qsos(qrz_status)`);
 });
 
-// =========================
-// HELPERS
-// =========================
 function authMiddleware(req, res, next) {
   const auth = req.headers.authorization || "";
   if (!auth.startsWith("Bearer ")) {
     return res.status(401).json({ error: "Token mancante" });
   }
-
   try {
     req.user = jwt.verify(auth.slice(7), JWT_SECRET);
     next();
@@ -204,17 +190,88 @@ function parseAdif(adifText) {
       regex.lastIndex = start + len;
     }
 
-    if (Object.keys(rec).length) {
-      records.push(rec);
-    }
+    if (Object.keys(rec).length) records.push(rec);
   }
 
   return records;
 }
 
-// =========================
-// QRZ XML SESSION
-// =========================
+function deg2rad(d) {
+  return d * Math.PI / 180;
+}
+
+function rad2deg(r) {
+  return r * 180 / Math.PI;
+}
+
+function normalizeBearing(deg) {
+  return (deg % 360 + 360) % 360;
+}
+
+function maidenheadToLatLon(grid) {
+  const g = String(grid || "").trim().toUpperCase();
+  if (g.length < 4) return null;
+
+  const A = "A".charCodeAt(0);
+  const lonField = g.charCodeAt(0) - A;
+  const latField = g.charCodeAt(1) - A;
+  const lonSquare = parseInt(g[2], 10);
+  const latSquare = parseInt(g[3], 10);
+
+  if ([lonField, latField, lonSquare, latSquare].some(v => Number.isNaN(v))) return null;
+
+  let lon = lonField * 20 - 180 + lonSquare * 2;
+  let lat = latField * 10 - 90 + latSquare;
+
+  if (g.length >= 6) {
+    const lonSub = g.charCodeAt(4) - A;
+    const latSub = g.charCodeAt(5) - A;
+    if (!Number.isNaN(lonSub) && !Number.isNaN(latSub)) {
+      lon += lonSub * (2 / 24);
+      lat += latSub * (1 / 24);
+      lon += (2 / 24) / 2;
+      lat += (1 / 24) / 2;
+      return { lat, lon };
+    }
+  }
+
+  lon += 1;
+  lat += 0.5;
+  return { lat, lon };
+}
+
+function calcDistanceAndBearing(from, to) {
+  const R = 6371;
+  const lat1 = deg2rad(from.lat);
+  const lon1 = deg2rad(from.lon);
+  const lat2 = deg2rad(to.lat);
+  const lon2 = deg2rad(to.lon);
+
+  const dLat = lat2 - lat1;
+  const dLon = lon2 - lon1;
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distance_km = R * c;
+
+  const y = Math.sin(dLon) * Math.cos(lat2);
+  const x =
+    Math.cos(lat1) * Math.sin(lat2) -
+    Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+
+  const bearing = normalizeBearing(rad2deg(Math.atan2(y, x)));
+  const long_path = normalizeBearing(bearing + 180);
+
+  return {
+    distance_km: Math.round(distance_km),
+    bearing: Math.round(bearing),
+    long_path: Math.round(long_path)
+  };
+}
+
 let qrzSessionKey = "";
 
 async function qrzXmlLogin() {
@@ -229,18 +286,14 @@ async function qrzXmlLogin() {
   const key = xmlTag(text, "Key");
   const error = xmlTag(text, "Error");
 
-  if (!key) {
-    throw new Error(error || "QRZ login fallito");
-  }
+  if (!key) throw new Error(error || "QRZ login fallito");
 
   qrzSessionKey = key;
   return key;
 }
 
 async function qrzXmlLookup(callsign) {
-  if (!qrzSessionKey) {
-    await qrzXmlLogin();
-  }
+  if (!qrzSessionKey) await qrzXmlLogin();
 
   let url =
     `https://xmldata.qrz.com/xml/current/?s=${encodeURIComponent(qrzSessionKey)}` +
@@ -250,24 +303,17 @@ async function qrzXmlLookup(callsign) {
   let text = await r.text();
 
   const error1 = xmlTag(text, "Error");
-  if (
-    !xmlTag(text, "call") &&
-    /session|password|authorization|timeout|invalid/i.test(error1 || "")
-  ) {
+  if (!xmlTag(text, "call") && /session|password|authorization|timeout|invalid/i.test(error1 || "")) {
     await qrzXmlLogin();
-
     url =
       `https://xmldata.qrz.com/xml/current/?s=${encodeURIComponent(qrzSessionKey)}` +
       `;callsign=${encodeURIComponent(callsign)}`;
-
     r = await fetchFn(url);
     text = await r.text();
   }
 
   const error = xmlTag(text, "Error");
-  if (error && !xmlTag(text, "call")) {
-    throw new Error(error);
-  }
+  if (error && !xmlTag(text, "call")) throw new Error(error);
 
   return {
     callsign: xmlTag(text, "call") || callsign,
@@ -306,9 +352,6 @@ async function syncOneQsoToQrz(q) {
   return { ok: false, raw: text };
 }
 
-// =========================
-// AUTH
-// =========================
 app.post("/api/auth/login", async (req, res) => {
   try {
     const username = String(req.body.username || "").trim();
@@ -319,19 +362,13 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     let ok = false;
-    if (
-      ADMIN_PASS.startsWith("$2a$") ||
-      ADMIN_PASS.startsWith("$2b$") ||
-      ADMIN_PASS.startsWith("$2y$")
-    ) {
+    if (ADMIN_PASS.startsWith("$2a$") || ADMIN_PASS.startsWith("$2b$") || ADMIN_PASS.startsWith("$2y$")) {
       ok = await bcrypt.compare(password, ADMIN_PASS);
     } else {
       ok = password === ADMIN_PASS;
     }
 
-    if (!ok) {
-      return res.status(401).json({ error: "Credenziali non valide" });
-    }
+    if (!ok) return res.status(401).json({ error: "Credenziali non valide" });
 
     const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: "30d" });
     res.json({ token });
@@ -341,9 +378,6 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-// =========================
-// LOOKUP QRZ
-// =========================
 app.post("/api/lookup", authMiddleware, async (req, res) => {
   try {
     const callsign = U(req.body.callsign);
@@ -353,6 +387,20 @@ app.post("/api/lookup", authMiddleware, async (req, res) => {
 
     const info = await qrzXmlLookup(callsign);
 
+    let bearing = null;
+    let long_path = null;
+    let distance_km = null;
+
+    const myPos = maidenheadToLatLon(MY_GRID);
+    const hisPos = maidenheadToLatLon(info.grid);
+
+    if (myPos && hisPos) {
+      const geo = calcDistanceAndBearing(myPos, hisPos);
+      bearing = geo.bearing;
+      long_path = geo.long_path;
+      distance_km = geo.distance_km;
+    }
+
     res.json({
       callsign: info.callsign || callsign,
       name: info.name || "",
@@ -360,9 +408,9 @@ app.post("/api/lookup", authMiddleware, async (req, res) => {
       qth: info.qth || "",
       country: info.country || "",
       grid: info.grid || "",
-      bearing: null,
-      long_path: null,
-      distance_km: null
+      bearing,
+      long_path,
+      distance_km
     });
   } catch (err) {
     console.error(err);
@@ -370,10 +418,6 @@ app.post("/api/lookup", authMiddleware, async (req, res) => {
   }
 });
 
-// =========================
-// CREATE QSO
-// =========================
-// Salva sempre LOCAL. La sync avviene solo con AGGIORNA QRZ.
 app.post("/api/qsos", authMiddleware, async (req, res) => {
   try {
     const q = req.body || {};
@@ -411,9 +455,6 @@ app.post("/api/qsos", authMiddleware, async (req, res) => {
   }
 });
 
-// =========================
-// LISTA QSOS PAGINATA
-// =========================
 app.get("/api/qsos", authMiddleware, async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
@@ -447,30 +488,19 @@ app.get("/api/qsos", authMiddleware, async (req, res) => {
     const total = Number(countRow?.total || 0);
     const totalPages = Math.max(1, Math.ceil(total / limit));
 
-    res.json({
-      page,
-      limit,
-      total,
-      totalPages,
-      rows
-    });
+    res.json({ page, limit, total, totalPages, rows });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Errore caricamento qsos" });
   }
 });
 
-// =========================
-// CONTROLLO DUPLICATI
-// =========================
 app.get("/api/qsos/check-duplicate", authMiddleware, async (req, res) => {
   try {
     const call = U(req.query.call);
     const excludeId = req.query.excludeId ? Number(req.query.excludeId) : null;
 
-    if (!call) {
-      return res.json({ count: 0, matches: [] });
-    }
+    if (!call) return res.json({ count: 0, matches: [] });
 
     const where = buildWhere({ call, excludeId });
 
@@ -500,9 +530,6 @@ app.get("/api/qsos/check-duplicate", authMiddleware, async (req, res) => {
   }
 });
 
-// =========================
-// DELETE QSO
-// =========================
 app.delete("/api/qsos/:id", authMiddleware, async (req, res) => {
   try {
     await runAsync(`DELETE FROM qsos WHERE id = ?`, [Number(req.params.id)]);
@@ -513,11 +540,6 @@ app.delete("/api/qsos/:id", authMiddleware, async (req, res) => {
   }
 });
 
-// =========================
-// ADIF IMPORT
-// =========================
-// Se source = qrz -> synced
-// Altrimenti -> local
 app.post("/api/adif/import", authMiddleware, async (req, res) => {
   try {
     const adif = String(req.body.adif || "");
@@ -528,7 +550,7 @@ app.post("/api/adif/import", authMiddleware, async (req, res) => {
 
     let imported = 0;
     let duplicates = 0;
-    let total_read = records.length;
+    const total_read = records.length;
 
     for (const r of records) {
       const call = U(r.call);
@@ -594,9 +616,6 @@ app.post("/api/adif/import", authMiddleware, async (req, res) => {
   }
 });
 
-// =========================
-// ADIF EXPORT
-// =========================
 app.get("/api/adif/export", authMiddleware, async (req, res) => {
   try {
     const rows = await allAsync(
@@ -639,16 +658,10 @@ app.get("/api/adif/export", authMiddleware, async (req, res) => {
   }
 });
 
-// =========================
-// QRZ SYNC
-// =========================
-// Sincronizza solo quando premi AGGIORNA QRZ
 app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
   try {
     if (!QRZ_LOGBOOK_API_KEY) {
-      return res.status(400).json({
-        error: "QRZ_LOGBOOK_API_KEY mancante"
-      });
+      return res.status(400).json({ error: "QRZ_LOGBOOK_API_KEY mancante" });
     }
 
     const rows = await allAsync(`
@@ -668,24 +681,15 @@ app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
         const syncRes = await syncOneQsoToQrz(q);
 
         if (syncRes.ok) {
-          await runAsync(
-            `UPDATE qsos SET qrz_status = 'synced' WHERE id = ?`,
-            [q.id]
-          );
+          await runAsync(`UPDATE qsos SET qrz_status = 'synced' WHERE id = ?`, [q.id]);
           synced++;
         } else {
-          await runAsync(
-            `UPDATE qsos SET qrz_status = 'error' WHERE id = ?`,
-            [q.id]
-          );
+          await runAsync(`UPDATE qsos SET qrz_status = 'error' WHERE id = ?`, [q.id]);
           errors++;
           console.error("QRZ sync fail QSO", q.id, syncRes.raw || syncRes.reason);
         }
       } catch (e) {
-        await runAsync(
-          `UPDATE qsos SET qrz_status = 'error' WHERE id = ?`,
-          [q.id]
-        );
+        await runAsync(`UPDATE qsos SET qrz_status = 'error' WHERE id = ?`, [q.id]);
         errors++;
         console.error("QRZ sync error QSO", q.id, e);
       }
@@ -702,9 +706,6 @@ app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
   }
 });
 
-// =========================
-// HEALTH
-// =========================
 app.get("/", (req, res) => {
   res.send("Logbook backend OK");
 });
