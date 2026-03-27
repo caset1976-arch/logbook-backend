@@ -27,7 +27,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           mkdir -p backup
-          pg_dump "$DATABASE_URL" > backup/db.sql
+          /usr/lib/postgresql/17/bin/pg_dump "$DATABASE_URL" > backup/db.sql
 
       - name: Upload backup
         uses: actions/upload-artifact@v4
