@@ -19,10 +19,9 @@ const ADMIN_PASS = process.env.ADMIN_PASS || "1234";
 const QRZ_USER = process.env.QRZ_USER || "in3jie";
 const QRZ_PASSWORD = process.env.QRZ_PASSWORD || "Tremalzo1976";
 
-// QRZ LOGBOOK API KEY (solo se ti servirà più avanti)
+// QRZ LOGBOOK API
 const QRZ_LOGBOOK_API_KEY = process.env.QRZ_LOGBOOK_API_KEY || "11B1-E407-55B1-866C";
 
-// fetch compatibile
 const fetchFn = (...args) => {
   if (typeof fetch === "function") return fetch(...args);
   return import("node-fetch").then(({ default: fetch }) => fetch(...args));
@@ -160,6 +159,32 @@ function buildWhere({ search, status, band, call, excludeId }) {
   };
 }
 
+function adifField(name, value) {
+  const v = String(value || "");
+  if (!v) return "";
+  return `<${name}:${v.length}>${v}`;
+}
+
+function qsoToAdif(q) {
+  return (
+    adifField("CALL", q.call) +
+    adifField("STATION_CALLSIGN", q.station_callsign || "IN3JIE") +
+    adifField("QSO_DATE", q.qso_date) +
+    adifField("TIME_ON", q.time_on) +
+    adifField("BAND", q.band) +
+    adifField("FREQ", q.freq) +
+    adifField("MODE", q.mode) +
+    adifField("RST_SENT", q.rst_sent) +
+    adifField("RST_RCVD", q.rst_rcvd) +
+    adifField("NAME", q.name) +
+    adifField("QTH", q.qth) +
+    adifField("COUNTRY", q.country) +
+    adifField("GRIDSQUARE", q.grid) +
+    adifField("COMMENT", q.comment) +
+    "<EOR>"
+  );
+}
+
 // =========================
 // QRZ XML SESSION
 // =========================
@@ -198,7 +223,10 @@ async function qrzXmlLookup(callsign) {
   let text = await r.text();
 
   const error1 = xmlTag(text, "Error");
-  if (!xmlTag(text, "call") && /session|password|authorization|timeout|invalid/i.test(error1 || "")) {
+  if (
+    !xmlTag(text, "call") &&
+    /session|password|authorization|timeout|invalid/i.test(error1 || "")
+  ) {
     await qrzXmlLogin();
 
     url =
@@ -535,12 +563,6 @@ app.post("/api/adif/import", authMiddleware, async (req, res) => {
 // =========================
 // ADIF EXPORT
 // =========================
-function adifField(name, value) {
-  const v = String(value || "");
-  if (!v) return "";
-  return `<${name}:${v.length}>${v}`;
-}
-
 app.get("/api/adif/export", authMiddleware, async (req, res) => {
   try {
     const rows = await allAsync(
@@ -584,19 +606,78 @@ app.get("/api/adif/export", authMiddleware, async (req, res) => {
 });
 
 // =========================
-// QRZ SYNC PLACEHOLDER
+// QRZ SYNC REALE
 // =========================
 app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
   try {
-    const totalUnsynced = await getAsync(
-      `SELECT COUNT(*) AS total FROM qsos WHERE COALESCE(qrz_status,'local') <> 'synced'`
-    );
+    if (!QRZ_LOGBOOK_API_KEY) {
+      return res.status(400).json({
+        error: "QRZ_LOGBOOK_API_KEY mancante"
+      });
+    }
+
+    const rows = await allAsync(`
+      SELECT
+        id, call, station_callsign, qso_date, time_on, band, freq, mode,
+        rst_sent, rst_rcvd, name, qth, country, grid, comment, qrz_status
+      FROM qsos
+      WHERE COALESCE(qrz_status,'local') <> 'synced'
+      ORDER BY qso_date ASC, time_on ASC, id ASC
+    `);
+
+    let synced = 0;
+    let errors = 0;
+
+    for (const q of rows) {
+      try {
+        const adif = qsoToAdif(q);
+
+        const body = new URLSearchParams({
+          KEY: QRZ_LOGBOOK_API_KEY,
+          ACTION: "INSERT",
+          ADIF: adif
+        });
+
+        const r = await fetchFn("https://logbook.qrz.com/api", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "IN3JIE-Logbook/1.0 (IN3JIE)"
+          },
+          body: body.toString()
+        });
+
+        const text = await r.text();
+        const ok = /(?:^|&)RESULT=(OK|REPLACE)(?:&|$)/i.test(text);
+
+        if (ok) {
+          await runAsync(
+            `UPDATE qsos SET qrz_status = 'synced' WHERE id = ?`,
+            [q.id]
+          );
+          synced++;
+        } else {
+          await runAsync(
+            `UPDATE qsos SET qrz_status = 'error' WHERE id = ?`,
+            [q.id]
+          );
+          errors++;
+          console.error("QRZ sync fail QSO", q.id, text);
+        }
+      } catch (e) {
+        await runAsync(
+          `UPDATE qsos SET qrz_status = 'error' WHERE id = ?`,
+          [q.id]
+        );
+        errors++;
+        console.error("QRZ sync error QSO", q.id, e);
+      }
+    }
 
     res.json({
-      total: Number(totalUnsynced?.total || 0),
-      synced: 0,
-      errors: 0,
-      logbook_api_key_present: !!QRZ_LOGBOOK_API_KEY
+      total: rows.length,
+      synced,
+      errors
     });
   } catch (err) {
     console.error(err);
