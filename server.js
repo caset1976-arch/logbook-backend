@@ -17,11 +17,12 @@ const ADMIN_PASS = process.env.ADMIN_PASS || "1234";
 
 // QRZ XML LOOKUP
 const QRZ_USER = process.env.QRZ_USER || "IN3JIE";
-const QRZ_PASSWORD = process.env.QRZ_PASSWORD || "Tremalzo1976";
+const QRZ_PASSWORD = process.env.QRZ_PASSWORD || "PASSWORD_QRZ";
 
-// QRZ LOGBOOK API (se ti serve dopo per sync/update logbook)
-const QRZ_LOGBOOK_API_KEY = process.env.QRZ_LOGBOOK_API_KEY || "11B1-E407-55B1-866C";
+// QRZ LOGBOOK API KEY (se la userai dopo per sync reale)
+const QRZ_LOGBOOK_API_KEY = process.env.QRZ_LOGBOOK_API_KEY || "";
 
+// fetch compatibile sia con Node recente sia con node-fetch
 const fetchFn = (...args) => {
   if (typeof fetch === "function") return fetch(...args);
   return import("node-fetch").then(({ default: fetch }) => fetch(...args));
@@ -198,8 +199,8 @@ async function qrzXmlLookup(callsign) {
 
   const error1 = xmlTag(text, "Error");
   if (
-    !xmlTag(text, "Callsign") &&
-    /session|password|authorization|timeout/i.test(error1 || "")
+    !xmlTag(text, "call") &&
+    /session|password|authorization|timeout|invalid/i.test(error1 || "")
   ) {
     await qrzXmlLogin();
     url =
@@ -210,7 +211,7 @@ async function qrzXmlLookup(callsign) {
   }
 
   const error = xmlTag(text, "Error");
-  if (error && !xmlTag(text, "Callsign")) {
+  if (error && !xmlTag(text, "call")) {
     throw new Error(error);
   }
 
@@ -467,7 +468,7 @@ app.post("/api/adif/import", authMiddleware, async (req, res) => {
 
     let imported = 0;
     let duplicates = 0;
-    const total_read = records.length;
+    let total_read = records.length;
 
     for (const r of records) {
       const call = U(r.call);
@@ -501,7 +502,8 @@ app.post("/api/adif/import", authMiddleware, async (req, res) => {
         INSERT INTO qsos (
           call, station_callsign, qso_date, time_on, band, freq, mode,
           rst_sent, rst_rcvd, name, qth, country, grid, comment, qrz_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         [
           call,
@@ -588,13 +590,27 @@ app.get("/api/adif/export", authMiddleware, async (req, res) => {
 // =========================
 app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
   try {
-    const totalRow = await getAsync(
+    // Qui puoi integrare la Logbook API key in un secondo momento
+    // senza toccare il frontend.
+    if (!QRZ_LOGBOOK_API_KEY) {
+      const totalUnsynced = await getAsync(
+        `SELECT COUNT(*) AS total FROM qsos WHERE COALESCE(qrz_status,'local') <> 'synced'`
+      );
+
+      return res.json({
+        total: Number(totalUnsynced?.total || 0),
+        synced: 0,
+        errors: 0
+      });
+    }
+
+    // Placeholder compatibile col frontend anche se metti la key.
+    const totalUnsynced = await getAsync(
       `SELECT COUNT(*) AS total FROM qsos WHERE COALESCE(qrz_status,'local') <> 'synced'`
     );
 
-    res.json({
-      configured: !!QRZ_LOGBOOK_API_KEY,
-      total: Number(totalRow?.total || 0),
+    return res.json({
+      total: Number(totalUnsynced?.total || 0),
       synced: 0,
       errors: 0
     });
