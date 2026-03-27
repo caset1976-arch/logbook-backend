@@ -14,7 +14,7 @@ const ADMIN_PASS = process.env.ADMIN_PASS || "1234";
 const QRZ_USER = process.env.QRZ_USER || "IN3JIE";
 const QRZ_PASSWORD = process.env.QRZ_PASSWORD || "Tremalzo1976";
 const QRZ_LOGBOOK_API_KEY = process.env.QRZ_LOGBOOK_API_KEY || "11B1-E407-55B1-866C";
-const MY_GRID = process.env.MY_GRID || "JN55";
+const MY_GRID = process.env.MY_GRID || "JN55IU";
 
 const fetchFn = (...args) => {
   if (typeof fetch === "function") return fetch(...args);
