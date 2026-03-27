@@ -2,7 +2,7 @@ name: Backup Database
 
 on:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: '0 2 * * *'  # ogni giorno alle 02:00
   workflow_dispatch:
 
 jobs:
@@ -10,8 +10,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+          echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
 
       - name: Backup database
         env:
@@ -21,7 +30,7 @@ jobs:
           pg_dump "$DATABASE_URL" > backup/db.sql
 
       - name: Upload backup
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v3
         with:
-          name: db-backup
+          name: database-backup
           path: backup/db.sql
