@@ -16,13 +16,13 @@ const ADMIN_USER = process.env.ADMIN_USER || "admin";
 const ADMIN_PASS = process.env.ADMIN_PASS || "1234";
 
 // QRZ XML LOOKUP
-const QRZ_USER = process.env.QRZ_USER || "IN3JIE";
+const QRZ_USER = process.env.QRZ_USER || "in3jie";
 const QRZ_PASSWORD = process.env.QRZ_PASSWORD || "Tremalzo1976";
 
-// QRZ LOGBOOK API KEY (se la userai dopo per sync reale)
+// QRZ LOGBOOK API KEY (solo se ti servirà più avanti)
 const QRZ_LOGBOOK_API_KEY = process.env.QRZ_LOGBOOK_API_KEY || "11B1-E407-55B1-866C";
 
-// fetch compatibile sia con Node recente sia con node-fetch
+// fetch compatibile
 const fetchFn = (...args) => {
   if (typeof fetch === "function") return fetch(...args);
   return import("node-fetch").then(({ default: fetch }) => fetch(...args));
@@ -198,14 +198,13 @@ async function qrzXmlLookup(callsign) {
   let text = await r.text();
 
   const error1 = xmlTag(text, "Error");
-  if (
-    !xmlTag(text, "call") &&
-    /session|password|authorization|timeout|invalid/i.test(error1 || "")
-  ) {
+  if (!xmlTag(text, "call") && /session|password|authorization|timeout|invalid/i.test(error1 || "")) {
     await qrzXmlLogin();
+
     url =
       `https://xmldata.qrz.com/xml/current/?s=${encodeURIComponent(qrzSessionKey)}` +
       `;callsign=${encodeURIComponent(callsign)}`;
+
     r = await fetchFn(url);
     text = await r.text();
   }
@@ -216,7 +215,6 @@ async function qrzXmlLookup(callsign) {
   }
 
   return {
-    raw: text,
     callsign: xmlTag(text, "call") || callsign,
     name: xmlTag(text, "fname"),
     surname: xmlTag(text, "name"),
@@ -543,117 +541,62 @@ function adifField(name, value) {
   return `<${name}:${v.length}>${v}`;
 }
 
-app.get("/api/qsos", authMiddleware, async (req, res) => {
+app.get("/api/adif/export", authMiddleware, async (req, res) => {
   try {
-    const page = Math.max(parseInt(req.query.page || "1", 10), 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit || "50", 10), 1), 200);
-    const offset = (page - 1) * limit;
-
-    const search = (req.query.search || "").trim().toUpperCase();
-    const status = (req.query.status || "").trim();
-    const band = (req.query.band || "").trim();
-
-    let where = [];
-    let params = [];
-
-    if (search) {
-      where.push(`(
-        UPPER(COALESCE(call,'')) LIKE ?
-        OR UPPER(COALESCE(name,'')) LIKE ?
-        OR UPPER(COALESCE(qth,'')) LIKE ?
-        OR UPPER(COALESCE(country,'')) LIKE ?
-        OR UPPER(COALESCE(grid,'')) LIKE ?
-        OR UPPER(COALESCE(comment,'')) LIKE ?
-      )`);
-      const q = `%${search}%`;
-      params.push(q, q, q, q, q, q);
-    }
-
-    if (status) {
-      where.push(`COALESCE(qrz_status,'local') = ?`);
-      params.push(status);
-    }
-
-    if (band) {
-      where.push(`COALESCE(band,'') = ?`);
-      params.push(band);
-    }
-
-    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-
-    db.get(
-      `SELECT COUNT(*) AS total FROM qsos ${whereSql}`,
-      params,
-      (errCount, countRow) => {
-        if (errCount) {
-          console.error(errCount);
-          return res.status(500).json({ error: "Errore count qsos" });
-        }
-
-        db.all(
-          `
-          SELECT
-            id, call, station_callsign, qso_date, time_on, band, freq, mode,
-            rst_sent, rst_rcvd, name, qth, country, grid, comment, qrz_status
-          FROM qsos
-          ${whereSql}
-          ORDER BY qso_date DESC, time_on DESC, id DESC
-          LIMIT ? OFFSET ?
-          `,
-          [...params, limit, offset],
-          (errRows, rows) => {
-            if (errRows) {
-              console.error(errRows);
-              return res.status(500).json({ error: "Errore caricamento qsos" });
-            }
-
-            const total = Number(countRow?.total || 0);
-            const totalPages = Math.max(1, Math.ceil(total / limit));
-
-            res.json({
-              page,
-              limit,
-              total,
-              totalPages,
-              rows
-            });
-          }
-        );
-      }
+    const rows = await allAsync(
+      `
+      SELECT
+        call, station_callsign, qso_date, time_on, band, freq, mode,
+        rst_sent, rst_rcvd, name, qth, country, grid, comment
+      FROM qsos
+      ORDER BY qso_date DESC, time_on DESC, id DESC
+      `
     );
+
+    let out = "IN3JIE LOGBOOK EXPORT\n<EOH>\n";
+
+    for (const q of rows) {
+      out +=
+        adifField("CALL", q.call) +
+        adifField("STATION_CALLSIGN", q.station_callsign) +
+        adifField("QSO_DATE", q.qso_date) +
+        adifField("TIME_ON", q.time_on) +
+        adifField("BAND", q.band) +
+        adifField("FREQ", q.freq) +
+        adifField("MODE", q.mode) +
+        adifField("RST_SENT", q.rst_sent) +
+        adifField("RST_RCVD", q.rst_rcvd) +
+        adifField("NAME", q.name) +
+        adifField("QTH", q.qth) +
+        adifField("COUNTRY", q.country) +
+        adifField("GRIDSQUARE", q.grid) +
+        adifField("COMMENT", q.comment) +
+        "<EOR>\n";
+    }
+
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="logbook.adi"');
+    res.send(out);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Errore caricamento qsos" });
+    res.status(500).json({ error: "Errore export ADIF" });
   }
 });
+
 // =========================
 // QRZ SYNC PLACEHOLDER
 // =========================
 app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
   try {
-    // Qui puoi integrare la Logbook API key in un secondo momento
-    // senza toccare il frontend.
-    if (!QRZ_LOGBOOK_API_KEY) {
-      const totalUnsynced = await getAsync(
-        `SELECT COUNT(*) AS total FROM qsos WHERE COALESCE(qrz_status,'local') <> 'synced'`
-      );
-
-      return res.json({
-        total: Number(totalUnsynced?.total || 0),
-        synced: 0,
-        errors: 0
-      });
-    }
-
-    // Placeholder compatibile col frontend anche se metti la key.
     const totalUnsynced = await getAsync(
       `SELECT COUNT(*) AS total FROM qsos WHERE COALESCE(qrz_status,'local') <> 'synced'`
     );
 
-    return res.json({
+    res.json({
       total: Number(totalUnsynced?.total || 0),
       synced: 0,
-      errors: 0
+      errors: 0,
+      logbook_api_key_present: !!QRZ_LOGBOOK_API_KEY
     });
   } catch (err) {
     console.error(err);
