@@ -17,7 +17,7 @@ const ADMIN_PASS = process.env.ADMIN_PASS || "1234";
 
 // QRZ XML LOOKUP
 const QRZ_USER = process.env.QRZ_USER || "IN3JIE";
-const QRZ_PASSWORD = process.env.QRZ_PASSWORD || "PASSWORD_QRZ";
+const QRZ_PASSWORD = process.env.QRZ_PASSWORD || "Tremalzo1976";
 
 // QRZ LOGBOOK API KEY (se la userai dopo per sync reale)
 const QRZ_LOGBOOK_API_KEY = process.env.QRZ_LOGBOOK_API_KEY || "";
