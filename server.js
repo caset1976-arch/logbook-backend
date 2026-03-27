@@ -449,7 +449,7 @@ app.post("/api/qsos", authMiddleware, async (req, res) => {
   }
 });
 
-app.get("/api/qsos", authMiddleware, async (req, res) => {
+app.get("/api/qsos", async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page || "1", 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || "50", 10), 1), 200);
