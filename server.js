@@ -28,8 +28,8 @@ if (!DATABASE_URL) {
 }
 
 const pool = new Pool({
-  connectionString: DATABASE_URL,
-  ssl: process.env.PGSSL === "true" ? { rejectUnauthorized: false } : false
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
 pool.on("error", (err) => {
