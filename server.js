@@ -186,6 +186,32 @@ function qsoToAdif(q) {
   );
 }
 
+function parseAdif(adifText) {
+  const records = [];
+  const chunks = String(adifText || "").split(/<eor>/i);
+
+  for (const chunk of chunks) {
+    const rec = {};
+    const regex = /<([^:>]+):(\d+)(?::[^>]+)?>/gi;
+    let match;
+
+    while ((match = regex.exec(chunk)) !== null) {
+      const field = match[1].toLowerCase();
+      const len = parseInt(match[2], 10);
+      const start = regex.lastIndex;
+      const value = chunk.substring(start, start + len);
+      rec[field] = value;
+      regex.lastIndex = start + len;
+    }
+
+    if (Object.keys(rec).length) {
+      records.push(rec);
+    }
+  }
+
+  return records;
+}
+
 // =========================
 // QRZ XML SESSION
 // =========================
@@ -276,10 +302,7 @@ async function syncOneQsoToQrz(q) {
   const text = await r.text();
   const ok = /(?:^|&)RESULT=(OK|REPLACE)(?:&|$)/i.test(text);
 
-  if (ok) {
-    return { ok: true, raw: text };
-  }
-
+  if (ok) return { ok: true, raw: text };
   return { ok: false, raw: text };
 }
 
@@ -350,11 +373,12 @@ app.post("/api/lookup", authMiddleware, async (req, res) => {
 // =========================
 // CREATE QSO
 // =========================
+// Salva sempre LOCAL. La sync avviene solo con AGGIORNA QRZ.
 app.post("/api/qsos", authMiddleware, async (req, res) => {
   try {
     const q = req.body || {};
 
-    const insertResult = await runAsync(
+    const result = await runAsync(
       `
       INSERT INTO qsos (
         call, station_callsign, qso_date, time_on, band, freq, mode,
@@ -380,38 +404,7 @@ app.post("/api/qsos", authMiddleware, async (req, res) => {
       ]
     );
 
-    const id = insertResult.lastID;
-
-    const savedQso = await getAsync(
-      `
-      SELECT
-        id, call, station_callsign, qso_date, time_on, band, freq, mode,
-        rst_sent, rst_rcvd, name, qth, country, grid, comment, qrz_status
-      FROM qsos
-      WHERE id = ?
-      `,
-      [id]
-    );
-
-    let qrz_status = "local";
-
-    if (QRZ_LOGBOOK_API_KEY) {
-      const syncRes = await syncOneQsoToQrz(savedQso);
-
-      if (syncRes.ok) {
-        qrz_status = "synced";
-      } else {
-        qrz_status = "error";
-        console.error("QRZ auto sync fail QSO", id, syncRes.raw || syncRes.reason);
-      }
-
-      await runAsync(
-        `UPDATE qsos SET qrz_status = ? WHERE id = ?`,
-        [qrz_status, id]
-      );
-    }
-
-    res.json({ ok: true, id, qrz_status });
+    res.json({ ok: true, id: result.lastID, qrz_status: "local" });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Errore salvataggio qso" });
@@ -523,32 +516,8 @@ app.delete("/api/qsos/:id", authMiddleware, async (req, res) => {
 // =========================
 // ADIF IMPORT
 // =========================
-function parseAdif(adifText) {
-  const records = [];
-  const chunks = String(adifText || "").split(/<eor>/i);
-
-  for (const chunk of chunks) {
-    const rec = {};
-    const regex = /<([^:>]+):(\d+)(?::[^>]+)?>/gi;
-    let match;
-
-    while ((match = regex.exec(chunk)) !== null) {
-      const field = match[1].toLowerCase();
-      const len = parseInt(match[2], 10);
-      const start = regex.lastIndex;
-      const value = chunk.substring(start, start + len);
-      rec[field] = value;
-      regex.lastIndex = start + len;
-    }
-
-    if (Object.keys(rec).length) {
-      records.push(rec);
-    }
-  }
-
-  return records;
-}
-
+// Se source = qrz -> synced
+// Altrimenti -> local
 app.post("/api/adif/import", authMiddleware, async (req, res) => {
   try {
     const adif = String(req.body.adif || "");
@@ -671,8 +640,9 @@ app.get("/api/adif/export", authMiddleware, async (req, res) => {
 });
 
 // =========================
-// QRZ SYNC REALE
+// QRZ SYNC
 // =========================
+// Sincronizza solo quando premi AGGIORNA QRZ
 app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
   try {
     if (!QRZ_LOGBOOK_API_KEY) {
