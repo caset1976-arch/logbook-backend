@@ -1,8 +1,8 @@
 const express = require("express");
-const sqlite3 = require("sqlite3").verbose();
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const { Pool } = require("pg");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,15 +21,28 @@ const fetchFn = (...args) => {
   return import("node-fetch").then(({ default: fetch }) => fetch(...args));
 };
 
+const DATABASE_URL = process.env.DATABASE_URL || "";
+if (!DATABASE_URL) {
+  console.error("DATABASE_URL mancante");
+  process.exit(1);
+}
+
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: process.env.PGSSL === "true" ? { rejectUnauthorized: false } : false
+});
+
+pool.on("error", (err) => {
+  console.error("Postgres pool error:", err);
+});
+
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
-const db = new sqlite3.Database("./logbook.db");
-
-db.serialize(() => {
-  db.run(`
+async function initDb() {
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS qsos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       call TEXT,
       station_callsign TEXT,
       qso_date TEXT,
@@ -48,11 +61,11 @@ db.serialize(() => {
     )
   `);
 
-  db.run(`CREATE INDEX IF NOT EXISTS idx_qsos_order ON qsos(qso_date DESC, time_on DESC, id DESC)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_qsos_call ON qsos(call)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_qsos_band ON qsos(band)`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_qsos_status ON qsos(qrz_status)`);
-});
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_qsos_order ON qsos(qso_date DESC, time_on DESC, id DESC)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_qsos_call ON qsos(call)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_qsos_band ON qsos(band)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS idx_qsos_status ON qsos(qrz_status)`);
+}
 
 function authMiddleware(req, res, next) {
   const auth = req.headers.authorization || "";
@@ -67,33 +80,6 @@ function authMiddleware(req, res, next) {
   }
 }
 
-function runAsync(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) return reject(err);
-      resolve(this);
-    });
-  });
-}
-
-function getAsync(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) return reject(err);
-      resolve(row);
-    });
-  });
-}
-
-function allAsync(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) return reject(err);
-      resolve(rows);
-    });
-  });
-}
-
 function U(v) {
   return String(v || "").trim().toUpperCase();
 }
@@ -106,43 +92,50 @@ function xmlTag(xml, tag) {
 function buildWhere({ search, status, band, call, excludeId }) {
   const where = [];
   const params = [];
+  let i = 1;
 
   if (search) {
     const q = `%${U(search)}%`;
     where.push(`(
-      UPPER(COALESCE(call,'')) LIKE ?
-      OR UPPER(COALESCE(name,'')) LIKE ?
-      OR UPPER(COALESCE(qth,'')) LIKE ?
-      OR UPPER(COALESCE(country,'')) LIKE ?
-      OR UPPER(COALESCE(grid,'')) LIKE ?
-      OR UPPER(COALESCE(comment,'')) LIKE ?
+      UPPER(COALESCE(call,'')) LIKE $${i}
+      OR UPPER(COALESCE(name,'')) LIKE $${i + 1}
+      OR UPPER(COALESCE(qth,'')) LIKE $${i + 2}
+      OR UPPER(COALESCE(country,'')) LIKE $${i + 3}
+      OR UPPER(COALESCE(grid,'')) LIKE $${i + 4}
+      OR UPPER(COALESCE(comment,'')) LIKE $${i + 5}
     )`);
     params.push(q, q, q, q, q, q);
+    i += 6;
   }
 
   if (status) {
-    where.push(`COALESCE(qrz_status,'local') = ?`);
+    where.push(`COALESCE(qrz_status,'local') = $${i}`);
     params.push(String(status).trim());
+    i += 1;
   }
 
   if (band) {
-    where.push(`COALESCE(band,'') = ?`);
+    where.push(`COALESCE(band,'') = $${i}`);
     params.push(String(band).trim());
+    i += 1;
   }
 
   if (call) {
-    where.push(`UPPER(COALESCE(call,'')) = ?`);
+    where.push(`UPPER(COALESCE(call,'')) = $${i}`);
     params.push(U(call));
+    i += 1;
   }
 
   if (excludeId) {
-    where.push(`id <> ?`);
+    where.push(`id <> $${i}`);
     params.push(Number(excludeId));
+    i += 1;
   }
 
   return {
     clause: where.length ? `WHERE ${where.join(" AND ")}` : "",
-    params
+    params,
+    nextIndex: i
   };
 }
 
@@ -422,12 +415,13 @@ app.post("/api/qsos", authMiddleware, async (req, res) => {
   try {
     const q = req.body || {};
 
-    const result = await runAsync(
+    const result = await pool.query(
       `
       INSERT INTO qsos (
         call, station_callsign, qso_date, time_on, band, freq, mode,
         rst_sent, rst_rcvd, name, qth, country, grid, comment, qrz_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      RETURNING id
       `,
       [
         U(q.call),
@@ -448,7 +442,7 @@ app.post("/api/qsos", authMiddleware, async (req, res) => {
       ]
     );
 
-    res.json({ ok: true, id: result.lastID, qrz_status: "local" });
+    res.json({ ok: true, id: result.rows[0].id, qrz_status: "local" });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Errore salvataggio qso" });
@@ -467,12 +461,12 @@ app.get("/api/qsos", authMiddleware, async (req, res) => {
       band: req.query.band || ""
     });
 
-    const countRow = await getAsync(
+    const countRow = await pool.query(
       `SELECT COUNT(*) AS total FROM qsos ${where.clause}`,
       where.params
     );
 
-    const rows = await allAsync(
+    const rows = await pool.query(
       `
       SELECT
         id, call, station_callsign, qso_date, time_on, band, freq, mode,
@@ -480,15 +474,21 @@ app.get("/api/qsos", authMiddleware, async (req, res) => {
       FROM qsos
       ${where.clause}
       ORDER BY qso_date DESC, time_on DESC, id DESC
-      LIMIT ? OFFSET ?
+      LIMIT $${where.nextIndex} OFFSET $${where.nextIndex + 1}
       `,
       [...where.params, limit, offset]
     );
 
-    const total = Number(countRow?.total || 0);
+    const total = Number(countRow.rows[0]?.total || 0);
     const totalPages = Math.max(1, Math.ceil(total / limit));
 
-    res.json({ page, limit, total, totalPages, rows });
+    res.json({
+      page,
+      limit,
+      total,
+      totalPages,
+      rows: rows.rows
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Errore caricamento qsos" });
@@ -504,12 +504,12 @@ app.get("/api/qsos/check-duplicate", authMiddleware, async (req, res) => {
 
     const where = buildWhere({ call, excludeId });
 
-    const countRow = await getAsync(
+    const countRow = await pool.query(
       `SELECT COUNT(*) AS total FROM qsos ${where.clause}`,
       where.params
     );
 
-    const rows = await allAsync(
+    const rows = await pool.query(
       `
       SELECT id, call, qso_date, time_on, band, mode, grid
       FROM qsos
@@ -521,8 +521,8 @@ app.get("/api/qsos/check-duplicate", authMiddleware, async (req, res) => {
     );
 
     res.json({
-      count: Number(countRow?.total || 0),
-      matches: rows
+      count: Number(countRow.rows[0]?.total || 0),
+      matches: rows.rows
     });
   } catch (err) {
     console.error(err);
@@ -532,7 +532,7 @@ app.get("/api/qsos/check-duplicate", authMiddleware, async (req, res) => {
 
 app.delete("/api/qsos/:id", authMiddleware, async (req, res) => {
   try {
-    await runAsync(`DELETE FROM qsos WHERE id = ?`, [Number(req.params.id)]);
+    await pool.query(`DELETE FROM qsos WHERE id = $1`, [Number(req.params.id)]);
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -561,31 +561,31 @@ app.post("/api/adif/import", authMiddleware, async (req, res) => {
 
       if (!call) continue;
 
-      const exists = await getAsync(
+      const exists = await pool.query(
         `
         SELECT id FROM qsos
-        WHERE UPPER(COALESCE(call,'')) = ?
-          AND COALESCE(qso_date,'') = ?
-          AND COALESCE(time_on,'') = ?
-          AND COALESCE(band,'') = ?
-          AND COALESCE(mode,'') = ?
+        WHERE UPPER(COALESCE(call,'')) = $1
+          AND COALESCE(qso_date,'') = $2
+          AND COALESCE(time_on,'') = $3
+          AND COALESCE(band,'') = $4
+          AND COALESCE(mode,'') = $5
         LIMIT 1
         `,
         [call, qso_date, time_on, band, mode]
       );
 
-      if (exists) {
+      if (exists.rows.length) {
         duplicates++;
         continue;
       }
 
-      await runAsync(
+      await pool.query(
         `
         INSERT INTO qsos (
           call, station_callsign, qso_date, time_on, band, freq, mode,
           rst_sent, rst_rcvd, name, qth, country, grid, comment, qrz_status
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
         `,
         [
           call,
@@ -618,7 +618,7 @@ app.post("/api/adif/import", authMiddleware, async (req, res) => {
 
 app.get("/api/adif/export", authMiddleware, async (req, res) => {
   try {
-    const rows = await allAsync(
+    const rows = await pool.query(
       `
       SELECT
         call, station_callsign, qso_date, time_on, band, freq, mode,
@@ -630,7 +630,7 @@ app.get("/api/adif/export", authMiddleware, async (req, res) => {
 
     let out = "IN3JIE LOGBOOK EXPORT\n<EOH>\n";
 
-    for (const q of rows) {
+    for (const q of rows.rows) {
       out +=
         adifField("CALL", q.call) +
         adifField("STATION_CALLSIGN", q.station_callsign) +
@@ -664,7 +664,7 @@ app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "QRZ_LOGBOOK_API_KEY mancante" });
     }
 
-    const rows = await allAsync(`
+    const rows = await pool.query(`
       SELECT
         id, call, station_callsign, qso_date, time_on, band, freq, mode,
         rst_sent, rst_rcvd, name, qth, country, grid, comment, qrz_status
@@ -676,27 +676,27 @@ app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
     let synced = 0;
     let errors = 0;
 
-    for (const q of rows) {
+    for (const q of rows.rows) {
       try {
         const syncRes = await syncOneQsoToQrz(q);
 
         if (syncRes.ok) {
-          await runAsync(`UPDATE qsos SET qrz_status = 'synced' WHERE id = ?`, [q.id]);
+          await pool.query(`UPDATE qsos SET qrz_status = 'synced' WHERE id = $1`, [q.id]);
           synced++;
         } else {
-          await runAsync(`UPDATE qsos SET qrz_status = 'error' WHERE id = ?`, [q.id]);
+          await pool.query(`UPDATE qsos SET qrz_status = 'error' WHERE id = $1`, [q.id]);
           errors++;
           console.error("QRZ sync fail QSO", q.id, syncRes.raw || syncRes.reason);
         }
       } catch (e) {
-        await runAsync(`UPDATE qsos SET qrz_status = 'error' WHERE id = ?`, [q.id]);
+        await pool.query(`UPDATE qsos SET qrz_status = 'error' WHERE id = $1`, [q.id]);
         errors++;
         console.error("QRZ sync error QSO", q.id, e);
       }
     }
 
     res.json({
-      total: rows.length,
+      total: rows.rows.length,
       synced,
       errors
     });
@@ -710,6 +710,13 @@ app.get("/", (req, res) => {
   res.send("Logbook backend OK");
 });
 
-app.listen(PORT, () => {
-  console.log(`Server attivo sulla porta ${PORT}`);
-});
+initDb()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`Server attivo sulla porta ${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error("Errore inizializzazione Postgres:", err);
+    process.exit(1);
+  });
