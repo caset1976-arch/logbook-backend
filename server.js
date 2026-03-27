@@ -22,6 +22,7 @@ const QRZ_PASSWORD = process.env.QRZ_PASSWORD || "Tremalzo1976";
 // QRZ LOGBOOK API
 const QRZ_LOGBOOK_API_KEY = process.env.QRZ_LOGBOOK_API_KEY || "11B1-E407-55B1-866C";
 
+// fetch compatibile
 const fetchFn = (...args) => {
   if (typeof fetch === "function") return fetch(...args);
   return import("node-fetch").then(({ default: fetch }) => fetch(...args));
@@ -252,6 +253,36 @@ async function qrzXmlLookup(callsign) {
   };
 }
 
+async function syncOneQsoToQrz(q) {
+  if (!QRZ_LOGBOOK_API_KEY) {
+    return { ok: false, reason: "QRZ_LOGBOOK_API_KEY mancante" };
+  }
+
+  const body = new URLSearchParams({
+    KEY: QRZ_LOGBOOK_API_KEY,
+    ACTION: "INSERT",
+    ADIF: qsoToAdif(q)
+  });
+
+  const r = await fetchFn("https://logbook.qrz.com/api", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": "IN3JIE-Logbook/1.0 (IN3JIE)"
+    },
+    body: body.toString()
+  });
+
+  const text = await r.text();
+  const ok = /(?:^|&)RESULT=(OK|REPLACE)(?:&|$)/i.test(text);
+
+  if (ok) {
+    return { ok: true, raw: text };
+  }
+
+  return { ok: false, raw: text };
+}
+
 // =========================
 // AUTH
 // =========================
@@ -323,7 +354,7 @@ app.post("/api/qsos", authMiddleware, async (req, res) => {
   try {
     const q = req.body || {};
 
-    const result = await runAsync(
+    const insertResult = await runAsync(
       `
       INSERT INTO qsos (
         call, station_callsign, qso_date, time_on, band, freq, mode,
@@ -345,11 +376,42 @@ app.post("/api/qsos", authMiddleware, async (req, res) => {
         q.country || "",
         q.grid || "",
         q.comment || "",
-        q.qrz_status || "local"
+        "local"
       ]
     );
 
-    res.json({ ok: true, id: result.lastID });
+    const id = insertResult.lastID;
+
+    const savedQso = await getAsync(
+      `
+      SELECT
+        id, call, station_callsign, qso_date, time_on, band, freq, mode,
+        rst_sent, rst_rcvd, name, qth, country, grid, comment, qrz_status
+      FROM qsos
+      WHERE id = ?
+      `,
+      [id]
+    );
+
+    let qrz_status = "local";
+
+    if (QRZ_LOGBOOK_API_KEY) {
+      const syncRes = await syncOneQsoToQrz(savedQso);
+
+      if (syncRes.ok) {
+        qrz_status = "synced";
+      } else {
+        qrz_status = "error";
+        console.error("QRZ auto sync fail QSO", id, syncRes.raw || syncRes.reason);
+      }
+
+      await runAsync(
+        `UPDATE qsos SET qrz_status = ? WHERE id = ?`,
+        [qrz_status, id]
+      );
+    }
+
+    res.json({ ok: true, id, qrz_status });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Errore salvataggio qso" });
@@ -490,6 +552,9 @@ function parseAdif(adifText) {
 app.post("/api/adif/import", authMiddleware, async (req, res) => {
   try {
     const adif = String(req.body.adif || "");
+    const source = String(req.body.source || "other").toLowerCase();
+    const importedStatus = source === "qrz" ? "synced" : "local";
+
     const records = parseAdif(adif);
 
     let imported = 0;
@@ -546,7 +611,7 @@ app.post("/api/adif/import", authMiddleware, async (req, res) => {
           r.country || "",
           r.gridsquare || r.grid || "",
           r.comment || "",
-          "local"
+          importedStatus
         ]
       );
 
@@ -630,27 +695,9 @@ app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
 
     for (const q of rows) {
       try {
-        const adif = qsoToAdif(q);
+        const syncRes = await syncOneQsoToQrz(q);
 
-        const body = new URLSearchParams({
-          KEY: QRZ_LOGBOOK_API_KEY,
-          ACTION: "INSERT",
-          ADIF: adif
-        });
-
-        const r = await fetchFn("https://logbook.qrz.com/api", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "IN3JIE-Logbook/1.0 (IN3JIE)"
-          },
-          body: body.toString()
-        });
-
-        const text = await r.text();
-        const ok = /(?:^|&)RESULT=(OK|REPLACE)(?:&|$)/i.test(text);
-
-        if (ok) {
+        if (syncRes.ok) {
           await runAsync(
             `UPDATE qsos SET qrz_status = 'synced' WHERE id = ?`,
             [q.id]
@@ -662,7 +709,7 @@ app.post("/api/qrz/sync", authMiddleware, async (req, res) => {
             [q.id]
           );
           errors++;
-          console.error("QRZ sync fail QSO", q.id, text);
+          console.error("QRZ sync fail QSO", q.id, syncRes.raw || syncRes.reason);
         }
       } catch (e) {
         await runAsync(
