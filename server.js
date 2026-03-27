@@ -42,7 +42,7 @@ app.use(express.json({ limit: "10mb" }));
 async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS qsos (
-      id SERIAL PRIMARY KEY,
+      id BIGINT PRIMARY KEY,
       call TEXT,
       station_callsign TEXT,
       qso_date TEXT,
@@ -58,6 +58,21 @@ async function initDb() {
       grid TEXT,
       comment TEXT,
       qrz_status TEXT DEFAULT 'local'
+    )
+  `);
+
+  await pool.query(`CREATE SEQUENCE IF NOT EXISTS qsos_id_seq`);
+
+  await pool.query(`
+    ALTER TABLE qsos
+    ALTER COLUMN id SET DEFAULT nextval('qsos_id_seq')
+  `);
+
+  await pool.query(`
+    SELECT setval(
+      'qsos_id_seq',
+      GREATEST(COALESCE((SELECT MAX(id) FROM qsos), 0), 1),
+      true
     )
   `);
 
@@ -355,7 +370,11 @@ app.post("/api/auth/login", async (req, res) => {
     }
 
     let ok = false;
-    if (ADMIN_PASS.startsWith("$2a$") || ADMIN_PASS.startsWith("$2b$") || ADMIN_PASS.startsWith("$2y$")) {
+    if (
+      ADMIN_PASS.startsWith("$2a$") ||
+      ADMIN_PASS.startsWith("$2b$") ||
+      ADMIN_PASS.startsWith("$2y$")
+    ) {
       ok = await bcrypt.compare(password, ADMIN_PASS);
     } else {
       ok = password === ADMIN_PASS;
